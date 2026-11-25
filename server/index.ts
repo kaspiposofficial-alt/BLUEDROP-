@@ -14,6 +14,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -49,8 +50,8 @@ import {
   formatIdToExtension,
   inspectMediaUrl,
   isSafeExternalHttpUrl,
+  runFfmpegFileToTempFile,
   runFfmpegStreamToTempFile,
-  runFfmpegTranscode,
   searchMedia,
 } from './media.js';
 
@@ -140,22 +141,42 @@ export function sendJson(res: http.ServerResponse, statusCode: number, body: unk
   res.end(payload);
 }
 
-function readBinaryBody(req: http.IncomingMessage, maxBytes = 55 * 1024 * 1024): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
+async function writeStreamToTempFile(
+  req: http.IncomingMessage,
+  inputExt: string,
+  maxBytes = 2 * 1024 * 1024 * 1024
+): Promise<{ tmpDir: string; inputPath: string; totalBytes: number; cleanup: () => Promise<void> }> {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bluedrop-up-'));
+  const cleanExt = inputExt.replace(/[^a-z0-9]/gi, '').slice(0, 6) || 'bin';
+  const inputPath = path.join(tmpDir, `input.${cleanExt}`);
+  const cleanup = async (): Promise<void> => {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  };
+
+  try {
     let totalBytes = 0;
-    req.on('data', (chunk: Buffer) => {
-      totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
-        reject(new Error('Uploaded media exceeds 55MB limit.'));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
+    await new Promise<void>((resolve, reject) => {
+      const ws = fs.createWriteStream(inputPath);
+      req.on('data', (chunk: Buffer) => {
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          req.destroy();
+          ws.destroy(new Error('Uploaded media exceeds 2GB stream limit.'));
+        }
+      });
+      req.on('error', (err) => {
+        ws.destroy();
+        reject(err);
+      });
+      ws.on('error', reject);
+      ws.on('finish', resolve);
+      req.pipe(ws);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
+    return { tmpDir, inputPath, totalBytes, cleanup };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }
 
 function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -446,9 +467,11 @@ export function createApiHandler(
       }
     }
 
-    // M3b. GET /api/media/stream (Range-aware same-origin video/audio preview proxy for CORS-blocked CDNs)
+    // M3b. GET /api/media/stream (Range-aware same-origin video/audio preview proxy for CORS-blocked CDNs — zero mid-stream timeout)
     if (pathname === '/api/media/stream' && (method === 'GET' || method === 'HEAD')) {
       try {
+        req.setTimeout(0);
+        res.setTimeout(0);
         const rawUrl = (parsedUrl.searchParams.get('url') ?? '').trim();
         const safeUrl = isSafeExternalHttpUrl(rawUrl);
         if (!safeUrl) {
@@ -463,11 +486,19 @@ export function createApiHandler(
         if (typeof req.headers.range === 'string' && req.headers.range) {
           reqHeaders.Range = req.headers.range;
         }
-        const upstream = await fetch(safeUrl.toString(), {
-          method: method === 'HEAD' ? 'HEAD' : 'GET',
-          headers: reqHeaders,
-          signal: AbortSignal.timeout(20000),
-        });
+        const connectController = new AbortController();
+        const connectTimer = setTimeout(() => connectController.abort(), 22000);
+        req.on('close', () => connectController.abort());
+        let upstream: globalThis.Response;
+        try {
+          upstream = await fetch(safeUrl.toString(), {
+            method: method === 'HEAD' ? 'HEAD' : 'GET',
+            headers: reqHeaders,
+            signal: connectController.signal,
+          });
+        } finally {
+          clearTimeout(connectTimer);
+        }
         if (!upstream.ok && upstream.status !== 206) {
           sendJson(res, 400, { error: `Upstream returned ${upstream.status}` });
           return true;
@@ -494,26 +525,34 @@ export function createApiHandler(
         nodeStream.on('error', () => {
           if (!res.writableEnded) res.end();
         });
+        req.on('close', () => {
+          nodeStream.destroy();
+        });
         nodeStream.pipe(res);
         return true;
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Stream proxy failed.';
-        sendJson(res, 400, { error: message });
+        if (!res.headersSent) sendJson(res, 400, { error: message });
         return true;
       }
     }
 
-    // M4. HEAD / GET / POST /api/media/download (Zero-RAM HTTP stream passthrough + FFmpeg direct URL streaming)
+    // M4. HEAD / GET / POST /api/media/download (Zero-RAM HTTP stream passthrough + FFmpeg direct URL streaming for any duration including 1h+)
     if (
       pathname === '/api/media/download' &&
       (method === 'HEAD' || method === 'GET' || method === 'POST')
     ) {
+      let resolvedStreamUrl = '';
+      let resolvedDisposition = 'attachment';
       try {
+        req.setTimeout(0);
+        res.setTimeout(0);
         const body = method === 'POST' ? await readJsonBody(req) : {};
         const streamUrl = (
           parsedUrl.searchParams.get('streamUrl') ??
           (typeof body.streamUrl === 'string' ? body.streamUrl : '')
         ).trim();
+        resolvedStreamUrl = streamUrl;
         const formatId = (
           parsedUrl.searchParams.get('format') ??
           (typeof body.format === 'string' ? body.format : 'mp3-320')
@@ -532,6 +571,7 @@ export function createApiHandler(
           title.replace(/[^a-z0-9\u0600-\u06FF _-]+/gi, '_').trim().slice(0, 64) || 'bluedrop-media';
         const outExt = formatIdToExtension(formatId);
         const contentDisposition = `attachment; filename="${safeAsciiName}.${outExt}"; filename*=UTF-8''${encodeURIComponent(`${safeUtf8Name}.${outExt}`)}`;
+        resolvedDisposition = contentDisposition;
 
         if (!streamUrl) {
           sendJson(res, 400, { error: 'Missing direct streamUrl for download/conversion.' });
@@ -573,37 +613,65 @@ export function createApiHandler(
             res.end();
             return true;
           }
-          res.writeHead(200, {
+          const headHeaders: Record<string, string> = {
             'Content-Type': 'application/octet-stream',
             'Content-Disposition': contentDisposition,
             ...buildCorsHeaders(req),
-          });
+          };
+          const cRange = headProbe?.headers.get('content-range') || '';
+          const rangeTotal = cRange.match(/\/(\d+)\s*$/)?.[1];
+          const rawLen = rangeTotal || (headProbe?.status === 200 ? headProbe.headers.get('content-length') : null);
+          if (rawLen && /^\d+$/.test(rawLen)) {
+            headHeaders['Content-Length'] = rawLen;
+          }
+          res.writeHead(200, headHeaders);
           res.end();
           return true;
         }
 
         const remotePathLower = safeTarget.pathname.toLowerCase();
+        const queryMime = (safeTarget.searchParams.get('mime') ?? '').toLowerCase();
         const isHls = remotePathLower.endsWith('.m3u8');
+        const isMp4Source =
+          remotePathLower.endsWith('.mp4') ||
+          remotePathLower.endsWith('.m4v') ||
+          queryMime.includes('video/mp4');
+        const isWebmSource =
+          remotePathLower.endsWith('.webm') || queryMime.includes('video/webm');
+        const isM4aSource =
+          remotePathLower.endsWith('.m4a') || queryMime.includes('audio/mp4');
+        const isMp3Source =
+          remotePathLower.endsWith('.mp3') || queryMime.includes('audio/mpeg');
+
         const directCompatible =
           !isHls &&
-          ((formatId === 'm4a' && remotePathLower.endsWith('.m4a')) ||
-            ((formatId === 'mp4-1080' || formatId === 'mp4-4k') &&
-              (remotePathLower.endsWith('.mp4') || remotePathLower.endsWith('.m4v'))) ||
-            (formatId === 'mp3-320' && remotePathLower.endsWith('.mp3')) ||
+          ((formatId === 'm4a' && isM4aSource) ||
+            ((formatId === 'mp4-1080' || formatId === 'mp4-4k' || formatId === 'mp4-720') &&
+              isMp4Source) ||
+            (formatId === 'webm' && isWebmSource) ||
+            ((formatId === 'mp3-320' || formatId === 'mp3-192') && isMp3Source) ||
             (formatId === 'jpg' &&
               (remotePathLower.endsWith('.jpg') || remotePathLower.endsWith('.jpeg'))) ||
             (formatId === 'png' && remotePathLower.endsWith('.png')) ||
             (formatId === 'webp' && remotePathLower.endsWith('.webp')));
 
         if (directCompatible) {
-          const upstream = await fetch(safeTarget.toString(), {
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
-              Referer: `${safeTarget.origin}/`,
-            },
-            signal: AbortSignal.timeout(25000),
-          });
+          const connectController = new AbortController();
+          const connectTimer = setTimeout(() => connectController.abort(), 25000);
+          req.on('close', () => connectController.abort());
+          let upstream: globalThis.Response;
+          try {
+            upstream = await fetch(safeTarget.toString(), {
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+                Referer: `${safeTarget.origin}/`,
+              },
+              signal: connectController.signal,
+            });
+          } finally {
+            clearTimeout(connectTimer);
+          }
           if (upstream.ok && upstream.body) {
             const cType =
               upstream.headers.get('content-type')?.split(';')[0] || 'application/octet-stream';
@@ -620,6 +688,9 @@ export function createApiHandler(
             );
             nodeStream.on('error', () => {
               if (!res.writableEnded) res.end();
+            });
+            req.on('close', () => {
+              nodeStream.destroy();
             });
             nodeStream.pipe(res);
             return true;
@@ -648,18 +719,65 @@ export function createApiHandler(
           void streamed.cleanup();
           if (!res.writableEnded) res.end();
         });
+        req.on('close', () => {
+          fileStream.destroy();
+          void streamed.cleanup();
+        });
         fileStream.pipe(res);
         return true;
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Download/transcode failed.';
-        sendJson(res, 400, { error: message });
+        const msg = err instanceof Error ? err.message : 'Download/transcode failed.';
+        const noFfmpeg =
+          msg.includes('ENOENT') ||
+          msg.toLowerCase().includes('spawn ffmpeg');
+        if (noFfmpeg && !res.headersSent && resolvedStreamUrl) {
+          try {
+            const safeTarget = isSafeExternalHttpUrl(resolvedStreamUrl);
+            if (safeTarget) {
+              const directResp = await fetch(safeTarget.toString(), {
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+                  Referer: `${safeTarget.origin}/`,
+                },
+                signal: AbortSignal.timeout(20000),
+              });
+              if (directResp.ok && directResp.body) {
+                const cType =
+                  directResp.headers.get('content-type')?.split(';')[0] || 'application/octet-stream';
+                const cLen = directResp.headers.get('content-length');
+                const headers: Record<string, string> = {
+                  'Content-Type': cType,
+                  'Content-Disposition': resolvedDisposition,
+                  ...buildCorsHeaders(req),
+                };
+                if (cLen) headers['Content-Length'] = cLen;
+                res.writeHead(200, headers);
+                const nodeStream = Readable.fromWeb(
+                  directResp.body as unknown as import('node:stream/web').ReadableStream<Uint8Array>
+                );
+                nodeStream.on('error', () => {
+                  if (!res.writableEnded) res.end();
+                });
+                nodeStream.pipe(res);
+                return true;
+              }
+            }
+          } catch {
+            // Fall through to structured error
+          }
+        }
+        if (!res.headersSent) sendJson(res, noFfmpeg ? 501 : 400, { error: msg });
         return true;
       }
     }
 
-    // M5. POST /api/media/convert (Local uploaded file -> Any format via FFmpeg)
+    // M5. POST /api/media/convert (Local uploaded file -> Any format via FFmpeg, streamed on disk for 1h+ files)
     if (pathname === '/api/media/convert' && method === 'POST') {
+      let uploadCleanup: (() => Promise<void>) | null = null;
       try {
+        req.setTimeout(0);
+        res.setTimeout(0);
         const targetFormat = (
           (req.headers['x-target-format'] as string | undefined) ??
           parsedUrl.searchParams.get('format') ??
@@ -674,19 +792,23 @@ export function createApiHandler(
         const artist = decodeURIComponent(
           (req.headers['x-artist'] as string | undefined) ?? 'BLUEDROP Studio'
         );
-        const inputBuffer = await readBinaryBody(req);
-        if (inputBuffer.byteLength === 0) {
+        const inputExt = path.extname(fileName).replace('.', '') || 'bin';
+        const uploaded = await writeStreamToTempFile(req, inputExt);
+        uploadCleanup = uploaded.cleanup;
+        if (uploaded.totalBytes === 0) {
+          await uploaded.cleanup();
           sendJson(res, 400, { error: 'Empty file upload.' });
           return true;
         }
-        const inputExt = path.extname(fileName).replace('.', '') || 'bin';
-        const converted = await runFfmpegTranscode({
-          inputBuffer,
-          inputExt,
+        const converted = await runFfmpegFileToTempFile({
+          inputPath: uploaded.inputPath,
           targetFormat,
           title,
           artist,
         });
+        await uploaded.cleanup();
+        uploadCleanup = null;
+
         const safeAsciiBase =
           title.replace(/[^a-z0-9 _-]+/gi, '_').trim().slice(0, 48) || 'converted';
         const safeUtf8Base =
@@ -694,14 +816,34 @@ export function createApiHandler(
         res.writeHead(200, {
           'Content-Type': converted.mimeType,
           'Content-Disposition': `attachment; filename="${safeAsciiBase}.${converted.ext}"; filename*=UTF-8''${encodeURIComponent(`${safeUtf8Base}.${converted.ext}`)}`,
-          'Content-Length': String(converted.outputBuffer.byteLength),
+          'Content-Length': String(converted.sizeBytes),
           ...buildCorsHeaders(req),
         });
-        res.end(converted.outputBuffer);
+        const outStream = fs.createReadStream(converted.outputPath);
+        outStream.on('close', () => {
+          void converted.cleanup();
+        });
+        outStream.on('error', () => {
+          void converted.cleanup();
+          if (!res.writableEnded) res.end();
+        });
+        req.on('close', () => {
+          outStream.destroy();
+          void converted.cleanup();
+        });
+        outStream.pipe(res);
         return true;
       } catch (err) {
+        if (uploadCleanup) await uploadCleanup().catch(() => {});
         const message = err instanceof Error ? err.message : 'FFmpeg conversion failed.';
-        sendJson(res, 400, { error: message });
+        const noFfmpeg =
+          message.includes('ENOENT') || message.toLowerCase().includes('spawn ffmpeg');
+        if (!res.headersSent) {
+          sendJson(res, noFfmpeg ? 501 : 400, {
+            error: noFfmpeg ? 'Server FFmpeg unavailable; use direct on-device export.' : message,
+            code: noFfmpeg ? 'NO_FFMPEG' : 'CONVERT_FAILED',
+          });
+        }
         return true;
       }
     }
@@ -1019,7 +1161,7 @@ export function createApiHandler(
 export function createAskHttpServer(options?: ApiHandlerOptions): http.Server {
   const handleApi = createApiHandler(options);
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const method = req.method ?? 'GET';
     const parsedUrl = new URL(req.url ?? '/', 'http://localhost');
     const pathname = parsedUrl.pathname;
@@ -1103,6 +1245,9 @@ export function createAskHttpServer(options?: ApiHandlerOptions): http.Server {
 
     sendJson(res, 404, { error: `Not found: ${pathname}` });
   });
+  server.requestTimeout = 0;
+  server.timeout = 0;
+  return server;
 }
 
 // Start server when run directly via `tsx server/index.ts`

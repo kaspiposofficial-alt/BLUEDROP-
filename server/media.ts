@@ -35,7 +35,7 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.nerdvpn.de',
 ];
 
-const MAX_REMOTE_MEDIA_BYTES = 140 * 1024 * 1024; // 140 MB safety cap
+const MAX_IMAGE_BUFFER_BYTES = 30 * 1024 * 1024; // 30 MB image/thumbnail cap; media streams bypass RAM buffering completely
 
 export function isSafeExternalHttpUrl(raw: string): URL | null {
   try {
@@ -173,53 +173,6 @@ async function fetchWithTimeout(
   }
 }
 
-interface ItunesResult {
-  trackId?: number;
-  trackName?: string;
-  artistName?: string;
-  artworkUrl100?: string;
-  trackTimeMillis?: number;
-  previewUrl?: string;
-  trackViewUrl?: string;
-  primaryGenreName?: string;
-}
-
-async function searchItunes(
-  query: string,
-  limit = 8,
-  mediaType: 'music' | 'musicVideo' = 'music'
-): Promise<MediaSearchItem[]> {
-  try {
-    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=${mediaType}&limit=${limit}`;
-    const resp = await fetchWithTimeout(url, {}, 4500);
-    if (!resp.ok) return [];
-    const data = (await resp.json()) as { results?: ItunesResult[] };
-    const rows = Array.isArray(data.results) ? data.results : [];
-    return rows
-      .filter((r) => Boolean(r.trackName))
-      .map((r, idx) => {
-        const durationSec = Math.round((r.trackTimeMillis ?? 30000) / 1000);
-        const thumb = (r.artworkUrl100 ?? '').replace('100x100bb', '600x600bb');
-        const kind: MediaKind = mediaType === 'musicVideo' ? 'video' : 'audio';
-        return {
-          id: `itunes-${mediaType}-${r.trackId ?? idx}`,
-          title: r.trackName ?? 'Untitled Track',
-          creator: r.artistName ?? 'Unknown Artist',
-          platform: 'itunes',
-          kind,
-          durationSec,
-          durationLabel: formatDuration(durationSec),
-          thumbnailUrl: thumb,
-          sourceUrl: r.previewUrl || r.trackViewUrl || '',
-          previewStreamUrl: r.previewUrl,
-          genreOrTag: r.primaryGenreName ?? (kind === 'video' ? 'Music Video' : 'Music'),
-        };
-      });
-  } catch {
-    return [];
-  }
-}
-
 interface PipedSearchItem {
   url?: string;
   title?: string;
@@ -351,48 +304,6 @@ async function searchYouTubeHtml(query: string): Promise<MediaSearchItem[]> {
   }
 }
 
-async function searchDeezer(query: string, limit = 8): Promise<MediaSearchItem[]> {
-  try {
-    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-    const resp = await fetchWithTimeout(url, {}, 4000);
-    if (!resp.ok) return [];
-    const json = (await resp.json()) as {
-      data?: Array<{
-        id?: number;
-        title?: string;
-        duration?: number;
-        preview?: string;
-        link?: string;
-        rank?: number;
-        artist?: { name?: string };
-        album?: { title?: string; cover_xl?: string; cover_big?: string; cover_medium?: string };
-      }>;
-    };
-    const rows = Array.isArray(json.data) ? json.data : [];
-    return rows
-      .filter((r) => Boolean(r.id && r.title))
-      .map((r) => {
-        const durationSec = Math.max(0, Number(r.duration ?? 30));
-        const thumb = r.album?.cover_xl || r.album?.cover_big || r.album?.cover_medium || '';
-        return {
-          id: `deezer-${r.id}`,
-          title: r.title!,
-          creator: r.artist?.name || 'Artist',
-          platform: 'audius' as const,
-          kind: 'audio' as const,
-          durationSec,
-          durationLabel: durationSec > 0 ? formatDuration(durationSec) : 'AUDIO',
-          thumbnailUrl: thumb,
-          sourceUrl: r.preview || r.link || '',
-          previewStreamUrl: r.preview,
-          genreOrTag: r.album?.title || 'Deezer Music',
-        };
-      });
-  } catch {
-    return [];
-  }
-}
-
 interface AudiusTrack {
   id?: string;
   title?: string;
@@ -404,7 +315,7 @@ interface AudiusTrack {
   artwork?: { '480x480'?: string; '150x150'?: string; '1000x1000'?: string };
 }
 
-async function searchAudius(query: string, limit = 6): Promise<MediaSearchItem[]> {
+async function searchAudius(query: string, limit = 8): Promise<MediaSearchItem[]> {
   try {
     const url = `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=BLUEDROP&limit=${limit}`;
     const resp = await fetchWithTimeout(url, {}, 4200);
@@ -413,6 +324,10 @@ async function searchAudius(query: string, limit = 6): Promise<MediaSearchItem[]
     const rows = Array.isArray(json.data) ? json.data : [];
     return rows
       .filter((t) => Boolean(t.id && t.title))
+      .filter((t) => {
+        const dur = Number(t.duration ?? 0);
+        return dur === 0 || dur >= 45;
+      })
       .map((t) => {
         const durationSec = Math.max(0, Number(t.duration ?? 0));
         const streamUrl = `https://api.audius.co/v1/tracks/${encodeURIComponent(t.id!)}/stream?app_name=BLUEDROP`;
@@ -549,6 +464,55 @@ async function searchArchiveOrg(
   }
 }
 
+async function searchYouTubeUnified(
+  query: string,
+  preferKind: 'video' | 'audio' = 'video'
+): Promise<{ items: MediaSearchItem[]; source: string }> {
+  const effectiveQuery =
+    preferKind === 'audio' && !/\b(audio|song|music|remix|lyrics)\b/i.test(query)
+      ? `${query} official audio`
+      : query;
+
+  const inv = await searchInvidious(effectiveQuery);
+  if (inv.length > 0) {
+    return {
+      items: preferKind === 'audio' ? inv.map((it) => ({ ...it, kind: 'audio' as const })) : inv,
+      source: 'invidious',
+    };
+  }
+  const piped = await searchPiped(effectiveQuery);
+  if (piped.length > 0) {
+    return {
+      items: preferKind === 'audio' ? piped.map((it) => ({ ...it, kind: 'audio' as const })) : piped,
+      source: 'piped',
+    };
+  }
+  const ytHtml = await searchYouTubeHtml(effectiveQuery);
+  return {
+    items: preferKind === 'audio' ? ytHtml.map((it) => ({ ...it, kind: 'audio' as const })) : ytHtml,
+    source: ytHtml.length > 0 ? 'youtube' : '',
+  };
+}
+
+function isShortSnippetItem(item: MediaSearchItem): boolean {
+  const urlStr = `${item.sourceUrl} ${item.previewStreamUrl || ''}`.toLowerCase();
+  if (
+    item.id.startsWith('itunes-') ||
+    item.id.startsWith('deezer-') ||
+    urlStr.includes('dzcdn.net') ||
+    urlStr.includes('mzstatic.com') ||
+    urlStr.includes('itunes.apple.com') ||
+    urlStr.includes('audiopreview')
+  ) {
+    return true;
+  }
+  // Never serve < 40s music previews in discovery unless it's a legitimate short clip with zero preview markers
+  if (item.kind === 'audio' && item.durationSec > 0 && item.durationSec < 40) {
+    return true;
+  }
+  return false;
+}
+
 export async function searchMedia(
   query: string,
   filter: 'all' | 'music' | 'video' = 'all'
@@ -563,48 +527,27 @@ export async function searchMedia(
 
   if (filter === 'all' || filter === 'music') {
     tasks.push(
-      searchAudius(trimmed, filter === 'music' ? 8 : 5).then((res) => {
+      searchAudius(trimmed, filter === 'music' ? 10 : 8).then((res) => {
         if (res.length > 0) sourcesUsed.push('audius');
         return res;
       })
     );
-    tasks.push(
-      searchDeezer(trimmed, filter === 'music' ? 8 : 4).then((res) => {
-        if (res.length > 0) sourcesUsed.push('deezer');
-        return res;
-      })
-    );
-    tasks.push(
-      searchItunes(trimmed, filter === 'music' ? 8 : 4, 'music').then((res) => {
-        if (res.length > 0) sourcesUsed.push('itunes');
-        return res;
-      })
-    );
+    if (filter === 'music') {
+      tasks.push(
+        searchYouTubeUnified(trimmed, 'audio').then((res) => {
+          if (res.items.length > 0 && res.source) sourcesUsed.push(res.source);
+          return res.items;
+        })
+      );
+    }
   }
 
   if (filter === 'all' || filter === 'video') {
     tasks.push(
-      searchItunes(trimmed, filter === 'video' ? 4 : 3, 'musicVideo').then((res) => {
-        if (res.length > 0) sourcesUsed.push('itunes-video');
-        return res;
+      searchYouTubeUnified(trimmed, 'video').then((res) => {
+        if (res.items.length > 0 && res.source) sourcesUsed.push(res.source);
+        return res.items;
       })
-    );
-    tasks.push(
-      (async () => {
-        const inv = await searchInvidious(trimmed);
-        if (inv.length > 0) {
-          sourcesUsed.push('invidious');
-          return inv;
-        }
-        const piped = await searchPiped(trimmed);
-        if (piped.length > 0) {
-          sourcesUsed.push('piped');
-          return piped;
-        }
-        const ytHtml = await searchYouTubeHtml(trimmed);
-        if (ytHtml.length > 0) sourcesUsed.push('youtube');
-        return ytHtml;
-      })()
     );
   }
 
@@ -619,19 +562,19 @@ export async function searchMedia(
   const combined: MediaSearchItem[] = [];
   const seen = new Set<string>();
 
-  // Interleave sources evenly and cap to 16 cards (4x4 desktop, 2x8 tablet -> zero orphan trailing cards)
+  // Interleave full-length sources evenly and cap to 16 cards (zero 29s/30s preview clips)
   const maxLen = Math.max(...settled.map((list) => list.length), 0);
   for (let i = 0; i < maxLen && combined.length < 16; i++) {
     for (const list of settled) {
       if (combined.length >= 16) break;
       const item = list[i];
-      if (!item || seen.has(item.id)) continue;
+      if (!item || seen.has(item.id) || isShortSnippetItem(item)) continue;
       seen.add(item.id);
       combined.push(item);
     }
   }
 
-  return { items: combined, sourcesUsed };
+  return { items: combined, sourcesUsed: Array.from(new Set(sourcesUsed)) };
 }
 
 function decodeHtmlEntities(str: string): string {
@@ -760,6 +703,19 @@ async function resolveYouTubeInnerTube(videoId: string): Promise<{
   durationSec?: number;
 }> {
   const clients = [
+    {
+      clientName: 'IOS',
+      clientVersion: '19.29.1',
+      deviceMake: 'Apple',
+      deviceModel: 'iPhone16,2',
+      userAgent: 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)',
+    },
+    {
+      clientName: 'ANDROID',
+      clientVersion: '19.29.37',
+      androidSdkVersion: 34,
+      userAgent: 'com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip',
+    },
     {
       clientName: 'ANDROID_VR',
       clientVersion: '1.60.19',
@@ -1352,6 +1308,10 @@ export async function inspectMediaUrl(rawUrl: string): Promise<MediaInspectResul
     if (!directAudioUrl && cobaltAud.url) {
       directAudioUrl = cobaltAud.url;
     }
+    // Muxed MP4 streams carry full audio track; expose as directAudioUrl so MP3/WAV/Offline never fall back to snippets
+    if (!directAudioUrl && directVideoUrl) {
+      directAudioUrl = directVideoUrl;
+    }
 
     const transcriptText = transcriptSegments.map((s) => s.text).join(' ');
 
@@ -1410,8 +1370,8 @@ export async function inspectMediaUrl(rawUrl: string): Promise<MediaInspectResul
       creator: safeUrl.hostname,
       platform: platform === 'itunes' ? 'itunes' : 'direct',
       kind,
-      durationSec: isDirectAudio || isDirectVideo ? 30 : 0,
-      durationLabel: isDirectAudio || isDirectVideo ? 'STREAM' : 'DIRECT',
+      durationSec: 0,
+      durationLabel: isDirectAudio || isDirectVideo ? 'FULL STREAM' : 'DIRECT',
       thumbnailUrl: isDirectImage ? urlStr : '',
       sourceUrl: urlStr,
       previewStreamUrl: pathname.endsWith('.m3u8') ? undefined : urlStr,
@@ -2743,6 +2703,12 @@ export async function runFfmpegStreamToTempFile(params: {
 
   try {
     const args = [
+      '-reconnect',
+      '1',
+      '-reconnect_streamed',
+      '1',
+      '-reconnect_delay_max',
+      '5',
       '-user_agent',
       USER_AGENT,
       ...buildFfmpegArgs(safeUrl.toString(), outputPath, params.targetFormat, {
@@ -2764,6 +2730,62 @@ export async function runFfmpegStreamToTempFile(params: {
           resolve();
         } else {
           reject(new Error(`FFmpeg stream exited with code ${code}: ${stderr.slice(-300)}`));
+        }
+      });
+    });
+
+    const stat = await fs.promises.stat(outputPath);
+    return {
+      outputPath,
+      mimeType: getMimeForExt(outExt),
+      ext: outExt,
+      sizeBytes: stat.size,
+      cleanup,
+    };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+}
+
+export async function runFfmpegFileToTempFile(params: {
+  inputPath: string;
+  targetFormat: TargetFormatId;
+  title?: string;
+  artist?: string;
+}): Promise<{
+  outputPath: string;
+  mimeType: string;
+  ext: string;
+  sizeBytes: number;
+  cleanup: () => Promise<void>;
+}> {
+  const outExt = formatIdToExtension(params.targetFormat);
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bluedrop-file-'));
+  const outputPath = path.join(tmpDir, `output.${outExt}`);
+  const cleanup = async (): Promise<void> => {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  };
+
+  try {
+    const args = buildFfmpegArgs(params.inputPath, outputPath, params.targetFormat, {
+      title: params.title,
+      artist: params.artist,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+        if (stderr.length > 4000) stderr = stderr.slice(-4000);
+      });
+      child.on('error', (err) => reject(err));
+      child.on('close', (code) => {
+        if (code === 0 && fs.existsSync(outputPath)) {
+          resolve();
+        } else {
+          reject(new Error(`FFmpeg exited with code ${code}: ${stderr.slice(-300)}`));
         }
       });
     });
@@ -2852,8 +2874,8 @@ export async function downloadRemoteBuffer(urlStr: string): Promise<{
     if (done) break;
     if (value) {
       total += value.byteLength;
-      if (total > MAX_REMOTE_MEDIA_BYTES) {
-        throw new Error('Remote media exceeds 140MB buffer cap; use direct streaming.');
+      if (total > MAX_IMAGE_BUFFER_BYTES) {
+        throw new Error('Remote buffer exceeds 30MB cap; use streaming endpoint.');
       }
       chunks.push(Buffer.from(value));
     }

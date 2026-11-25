@@ -65,6 +65,12 @@ export interface UiCopy {
   authGateTitle: string;
   authGateBody: string;
   authGateCta: string;
+  saveOfflineBtn: string;
+  offlineReadyBadge: string;
+  moreActionsLabel: string;
+  deleteTrackBtn: string;
+  moodMixMode: string;
+  blendToggleLabel: string;
 }
 
 export const UI_COPY: Record<UiLang, UiCopy> = {
@@ -131,6 +137,12 @@ export const UI_COPY: Record<UiLang, UiCopy> = {
     authGateBody:
       'Sign in once with your Google / Gmail account to unlock all format downloads, app installation across devices, and permanent profile & library sync.',
     authGateCta: 'Continue with Gmail',
+    saveOfflineBtn: 'Save Offline (No Wi-Fi)',
+    offlineReadyBadge: 'OFFLINE READY',
+    moreActionsLabel: 'Track actions',
+    deleteTrackBtn: 'Delete',
+    moodMixMode: 'Mood Match',
+    blendToggleLabel: 'AI Full Blend',
   },
   fr: {
     navDownloader: 'Explorer',
@@ -195,6 +207,12 @@ export const UI_COPY: Record<UiLang, UiCopy> = {
     authGateBody:
       'Validez votre compte Gmail pour débloquer tous les formats, l’installation de l’application et la synchronisation de votre bibliothèque.',
     authGateCta: 'Continuer avec Gmail',
+    saveOfflineBtn: 'Sauver Hors-Ligne (Sans Wi-Fi)',
+    offlineReadyBadge: 'HORS-LIGNE PRÊT',
+    moreActionsLabel: 'Actions',
+    deleteTrackBtn: 'Supprimer',
+    moodMixMode: 'Mix Ambiance',
+    blendToggleLabel: 'Fondu IA Complet',
   },
   ar: {
     navDownloader: 'اكتشف',
@@ -259,5 +277,11 @@ export const UI_COPY: Record<UiLang, UiCopy> = {
     authGateBody:
       'أكد حساب Gmail ديالك مرة وحدة باش تحمل كاع الصيغ (فيديو، موسيقى، صورة، أو التطبيق)، وتبقى مكتبتك وصورتك مسجلين دائماً.',
     authGateCta: 'المتابعة بحساب Gmail',
+    saveOfflineBtn: 'حفظ يخدم بلا ويفي (Offline)',
+    offlineReadyBadge: 'خادمة بلا ويفي',
+    moreActionsLabel: 'خيارات التراك',
+    deleteTrackBtn: 'مسح (Delete)',
+    moodMixMode: 'حسب المود',
+    blendToggleLabel: 'دمج الموديل التلقائي',
   },
 };

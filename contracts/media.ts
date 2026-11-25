@@ -152,6 +152,8 @@ export interface AiMediaRequest {
     platform: MediaPlatform;
     sourceUrl: string;
     audioUrl?: string;
+    audioBase64?: string;
+    audioMimeType?: string;
     description?: string;
     transcriptText?: string;
     keywords?: string[];
@@ -176,6 +178,7 @@ export interface AiMediaResponse {
   externalStatus?: string;
   heading: string;
   content: string;
+  synced?: Array<{ timeSec: number; line: string }>;
   bullets?: string[];
   stemMode?: {
     vocalGain: number;

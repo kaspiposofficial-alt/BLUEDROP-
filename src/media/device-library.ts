@@ -33,9 +33,11 @@ export interface DeviceLibraryItem {
   transcriptText?: string;
   extractorNote?: string;
   lyricsText?: string;
+  lyricsSynced?: Array<{ timeSec: number; line: string }>;
   localBlob?: Blob;
   mimeType?: string;
   fileSizeBytes?: number;
+  offlineReady?: boolean;
   savedAt: string;
   isolated?: boolean;
 }
@@ -160,8 +162,13 @@ export async function updateDeviceLibraryItem(
       | 'transcriptText'
       | 'extractorNote'
       | 'lyricsText'
+      | 'lyricsSynced'
       | 'durationSec'
       | 'durationLabel'
+      | 'localBlob'
+      | 'mimeType'
+      | 'fileSizeBytes'
+      | 'offlineReady'
     >
   >
 ): Promise<void> {

@@ -61,6 +61,7 @@ export class MascotStageController {
 
   private isSoftwareGl = false;
   private isAudioReactive = false;
+  private audioBands: [number, number, number, number] = [0.18, 0.18, 0.18, 0.18];
   private pointerActive = false;
   private pointerTargetX = 0;
   private pointerTargetY = 0;
@@ -103,6 +104,13 @@ export class MascotStageController {
 
   public setAudioActive(active: boolean): void {
     this.isAudioReactive = active;
+    if (!active) {
+      this.audioBands = [0.18, 0.18, 0.18, 0.18];
+    }
+  }
+
+  public setAudioLevels(bands: [number, number, number, number]): void {
+    this.audioBands = bands;
   }
 
   public applyCollectiveVisualStudy(study: { paletteHexes: string[]; depthRatio: number }): void {
@@ -597,8 +605,11 @@ export class MascotStageController {
       this.squashX = THREE.MathUtils.damp(this.squashX, 1, 10, dt);
       this.squashY = THREE.MathUtils.damp(this.squashY, 1, 10, dt);
 
+      const [bass, mid1, mid2, high] = this.audioBands;
+      const energy = Math.max(0, (bass + mid1 + mid2 + high) / 4 - 0.18);
+
       if (this.mascotGroup) {
-        const hoverY = Math.sin(t * (this.isAudioReactive ? 4.8 : 2.3)) * 0.06;
+        const hoverY = this.isAudioReactive ? Math.sin(t * 4.8) * (0.02 + energy * 0.09) : 0;
         this.mascotGroup.position.x = this.mascotX;
         this.mascotGroup.position.y = THREE.MathUtils.clamp(
           this.mascotY + hoverY,
@@ -616,28 +627,29 @@ export class MascotStageController {
       }
 
       if (this.headGroup) {
-        const bob = this.isAudioReactive ? Math.abs(Math.sin(t * 7.5)) * 0.14 : Math.sin(t * 2.2) * 0.04;
-        this.headGroup.rotation.x = bob;
+        const targetBob = this.isAudioReactive ? Math.max(0, bass - 0.18) * 0.22 : 0;
+        this.headGroup.rotation.x = THREE.MathUtils.damp(this.headGroup.rotation.x, targetBob, 14, dt);
       }
 
       if (this.leftArm && this.rightArm) {
-        const swing = Math.sin(t * (this.isAudioReactive ? 9.5 : 3.2)) * 0.25;
-        this.leftArm.rotation.z = 0.18 + swing;
-        this.rightArm.rotation.z = -0.18 - swing;
+        const swing = this.isAudioReactive ? Math.sin(t * 8.5) * (0.1 + energy * 0.32) : 0;
+        this.leftArm.rotation.z = THREE.MathUtils.damp(this.leftArm.rotation.z, 0.18 + swing, 12, dt);
+        this.rightArm.rotation.z = THREE.MathUtils.damp(this.rightArm.rotation.z, -0.18 - swing, 12, dt);
       }
 
       if (this.leftSpeakerCore && this.rightSpeakerCore) {
-        const pulse = this.isAudioReactive ? 1 + Math.abs(Math.sin(t * 10)) * 0.24 : 1;
-        this.leftSpeakerCore.scale.set(pulse, 1, pulse);
-        this.rightSpeakerCore.scale.set(pulse, 1, pulse);
+        const targetPulse = this.isAudioReactive ? 1 + Math.max(0, bass - 0.18) * 0.42 : 1;
+        const curPulse = THREE.MathUtils.damp(this.leftSpeakerCore.scale.x, targetPulse, 18, dt);
+        this.leftSpeakerCore.scale.set(curPulse, 1, curPulse);
+        this.rightSpeakerCore.scale.set(curPulse, 1, curPulse);
       }
 
+      const barTargets = [bass, (mid1 + mid2) * 0.5, high];
       for (let i = 0; i < this.mouthBars.length; i += 1) {
         const bar = this.mouthBars[i]!;
-        const wave = this.isAudioReactive
-          ? 0.6 + Math.abs(Math.sin(t * 11 + i * 1.4)) * 1.15
-          : 0.75 + Math.abs(Math.sin(t * 2.6 + i)) * 0.35;
-        bar.scale.y = wave;
+        const bandLevel = Math.max(0, (barTargets[i] ?? 0.18) - 0.18);
+        const targetWave = this.isAudioReactive ? 0.32 + bandLevel * 1.9 : 0.28;
+        bar.scale.y = THREE.MathUtils.damp(bar.scale.y, targetWave, 20, dt);
       }
 
       if (this.eyeLeft && this.eyeRight) {

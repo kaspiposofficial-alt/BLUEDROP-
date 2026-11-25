@@ -7,6 +7,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import type {
@@ -15,7 +16,7 @@ import type {
   MahsoodaKnowledgeCard,
 } from '../contracts/index.js';
 import type { ServerConfig } from './config.js';
-import { isSafeExternalHttpUrl } from './media.js';
+import { isSafeExternalHttpUrl, parseLrcSyncedLines } from './media.js';
 
 const BLOCKED_TERMS = [
   'nsfw',
@@ -27,7 +28,10 @@ const BLOCKED_TERMS = [
   'casino-spam',
 ];
 
-const TASTE_VAULT_PATH = path.resolve(process.cwd(), 'data', 'mahsooda_taste_vault.json');
+const TASTE_VAULT_PATH =
+  process.env.VERCEL === '1'
+    ? path.join(os.tmpdir(), 'mahsooda_taste_vault.json')
+    : path.resolve(process.cwd(), 'data', 'mahsooda_taste_vault.json');
 
 interface LearnedEntry {
   title: string;
@@ -191,7 +195,8 @@ export function extractPureLyricsOnly(raw: string): string {
     ) {
       continue;
     }
-    kept.push(line.replace(/^\*\*|\*\*$/g, '').trimEnd());
+    const withoutLrcPrefix = line.replace(/^\s*\[\d{1,3}:\d{2}(?:\.\d{1,3})?\]\s*/, '');
+    kept.push(withoutLrcPrefix.replace(/^\*\*|\*\*$/g, '').trimEnd());
   }
 
   while (kept.length > 0 && kept[kept.length - 1] === '') {
@@ -569,7 +574,17 @@ async function fetchSafeInlineAudio(
   audioUrl?: string
 ): Promise<{ mimeType: string; data: string } | null> {
   if (!audioUrl) return null;
-  const safe = isSafeExternalHttpUrl(audioUrl);
+  let targetUrl = audioUrl.trim();
+  if (targetUrl.startsWith('/api/media/stream?') || targetUrl.startsWith('/api/media/download?')) {
+    try {
+      const parsedLocal = new URL(targetUrl, 'http://localhost');
+      const inner = parsedLocal.searchParams.get('url');
+      if (inner) targetUrl = inner;
+    } catch {
+      // keep raw
+    }
+  }
+  const safe = isSafeExternalHttpUrl(targetUrl);
   if (!safe) return null;
   // Do not inline HLS playlists cleanly as single binary
   if (safe.pathname.toLowerCase().endsWith('.m3u8')) return null;
@@ -618,6 +633,8 @@ async function callGeminiSdk(
   options: {
     imageDataUrls?: string[];
     audioUrl?: string;
+    audioBase64?: string;
+    audioMimeType?: string;
     preferTranscribe?: boolean;
   } = {}
 ): Promise<{ text: string | null; modelUsed?: string }> {
@@ -626,7 +643,7 @@ async function callGeminiSdk(
   const ai = new GoogleGenAI({
     apiKey: config.apiKey,
     httpOptions: {
-      timeout: 15000,
+      timeout: 22000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -650,7 +667,22 @@ async function callGeminiSdk(
   }
 
   let hasAudioInline = false;
-  if (options.preferTranscribe && options.audioUrl) {
+  if (options.preferTranscribe && options.audioBase64) {
+    const cleanB64 = options.audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+    if (cleanB64.length > 64 && cleanB64.length <= 20 * 1024 * 1024) {
+      const mimeType =
+        options.audioMimeType && /^(audio|video)\/[a-z0-9.+-]+$/i.test(options.audioMimeType)
+          ? options.audioMimeType
+          : 'audio/mp4';
+      parts.push({
+        inlineData: {
+          mimeType,
+          data: cleanB64,
+        },
+      });
+      hasAudioInline = true;
+    }
+  } else if (options.preferTranscribe && options.audioUrl) {
     const inlineAudio = await fetchSafeInlineAudio(options.audioUrl);
     if (inlineAudio) {
       parts.push({ inlineData: inlineAudio });
@@ -777,12 +809,13 @@ export async function handleAiMediaAction(
 
   if (action === 'lyrics') {
     systemInstruction =
-      'You extract ONLY the exact sung/spoken lyrics line by line. Zero thinking text, zero intros, zero commentary, zero fabricated lyrics. CRITICAL: Preserve the EXACT original sung language and script (e.g., Arabic/Darija in Arabic script if sung in Arabic, French in French, English in English, Spanish in Spanish) — never auto-translate lyrics here. If no audio track or captions exist and you cannot verify exact lyrics, reply strictly with: NO_LYRICS_FOUND';
-    prompt = media.audioUrl
-      ? `Transcribe verbatim ONLY the exact sung or spoken lyrics from this audio track in its original sung language, line by line, with zero commentary or preamble:\nTitle: ${media.title}\nArtist: ${media.creator}`
-      : media.transcriptText?.trim()
-        ? `Extract and format ONLY the spoken/sung lyric lines from this transcript in their original language, line by line, removing timestamps and chatter:\n\n${media.transcriptText.slice(0, 4200)}`
-        : `Return strictly NO_LYRICS_FOUND because neither an audio stream nor transcript captions are attached for ${media.title}.`;
+      'You transcribe ONLY the exact sung or spoken lyrics in the track, line by line with LRC timestamps [mm:ss.xx] marking the exact second the vocalist or rapper starts each line. CRITICAL LANGUAGE RULE: Keep strictly the EXACT original sung/spoken language and alphabet/script of the audio itself (English -> English, French -> French, Arabic -> Arabic, Darija -> Darija, Spanish -> Spanish, etc.). NEVER translate, dub, or rewrite lyrics into Moroccan Darija or any other language. Zero thinking text, zero intros, zero commentary, zero fabricated lines. If there are no vocals or captions cannot be verified, reply strictly with: NO_LYRICS_FOUND';
+    prompt =
+      media.audioBase64 || media.audioUrl
+        ? `Listen carefully and transcribe verbatim ONLY the sung or spoken lyrics from this audio track in its EXACT original language and script (do NOT translate to any other language). Output each line in chronological LRC format [mm:ss.xx] <lyric line> synced to the exact second the artist/rapper sings or says it:\nTitle: ${media.title}\nArtist: ${media.creator}`
+        : media.transcriptText?.trim()
+          ? `Extract ONLY the spoken/sung lyric lines from this transcript in their exact original language (do NOT translate). Preserve or format chronological [mm:ss.xx] timestamps when present, with zero chatter:\n\n${media.transcriptText.slice(0, 4200)}`
+          : `Return strictly NO_LYRICS_FOUND because neither an audio stream nor transcript captions are attached for ${media.title}.`;
   } else if (action === 'watch') {
     prompt = `Watch and study the attached media frames and telemetry as a multimodal video analyst. ${langHint} Cover: (1) Visual scene observation from the keyframes, (2) Source provenance & format/duration context, (3) Core takeaway & key topics distilled.\n\n${contextBlock}`;
   } else if (action === 'taste_dna') {
@@ -809,18 +842,24 @@ export async function handleAiMediaAction(
 
   const images = isStrictLyrics ? [] : Array.isArray(media.imageDataUrls) ? media.imageDataUrls : [];
 
-  // If action === 'lyrics' without audioUrl and without transcriptText, never hallucinate fake lyrics!
-  if (action === 'lyrics' && !media.audioUrl && !media.transcriptText?.trim()) {
+  // If action === 'lyrics' without audioUrl, inline audio, or transcriptText, never hallucinate fake lyrics!
+  if (action === 'lyrics' && !media.audioUrl && !media.audioBase64 && !media.transcriptText?.trim()) {
     return buildLocalFallbackAiResponse(req);
   }
 
   // For strict lyrics or direct audio transcription, run Gemini SDK directly first when API key is set
-  if ((action === 'lyrics' || (action === 'transcript' && media.audioUrl)) && config.apiKey) {
+  if (
+    (action === 'lyrics' || (action === 'transcript' && (media.audioUrl || media.audioBase64))) &&
+    config.apiKey
+  ) {
     const geminiDirect = await callGeminiSdk(prompt, systemInstruction, config, {
       audioUrl: media.audioUrl,
+      audioBase64: media.audioBase64,
+      audioMimeType: media.audioMimeType,
       preferTranscribe: true,
     });
     if (geminiDirect.text) {
+      const synced = action === 'lyrics' ? parseLrcSyncedLines(geminiDirect.text) : undefined;
       const sanitized =
         action === 'lyrics' ? extractPureLyricsOnly(geminiDirect.text) : geminiDirect.text;
       if (sanitized && !/^NO_LYRICS_FOUND$/i.test(sanitized)) {
@@ -831,6 +870,7 @@ export async function handleAiMediaAction(
           modelUsed: geminiDirect.modelUsed,
           heading: action === 'lyrics' ? 'Lyrics' : 'Audio Transcript',
           content: sanitized,
+          synced: synced && synced.length > 0 ? synced : undefined,
         };
       }
       if (action === 'lyrics' && /^NO_LYRICS_FOUND$/i.test(sanitized)) {
@@ -841,6 +881,7 @@ export async function handleAiMediaAction(
 
   const external = await callExternalAiChat(prompt, systemInstruction, config, images);
   if (external.text) {
+    const synced = action === 'lyrics' ? parseLrcSyncedLines(external.text) : undefined;
     const sanitized =
       action === 'lyrics' || action === 'translate'
         ? extractPureLyricsOnly(external.text)
@@ -868,6 +909,7 @@ export async function handleAiMediaAction(
                     ? 'Translated Lyrics'
                     : `${external.modelUsed || config.aiModelName} Transcript`,
         content: sanitized,
+        synced: synced && synced.length > 0 ? synced : undefined,
       };
     }
   }
@@ -875,9 +917,12 @@ export async function handleAiMediaAction(
   const gemini = await callGeminiSdk(prompt, systemInstruction, config, {
     imageDataUrls: images,
     audioUrl: media.audioUrl,
+    audioBase64: media.audioBase64,
+    audioMimeType: media.audioMimeType,
     preferTranscribe: action === 'lyrics' || action === 'transcript',
   });
   if (gemini.text) {
+    const synced = action === 'lyrics' ? parseLrcSyncedLines(gemini.text) : undefined;
     const sanitized =
       action === 'lyrics' || action === 'translate'
         ? extractPureLyricsOnly(gemini.text)
@@ -905,6 +950,7 @@ export async function handleAiMediaAction(
                     ? 'Translated Lyrics'
                     : `AI Transcript`,
         content: sanitized,
+        synced: synced && synced.length > 0 ? synced : undefined,
       };
     }
   }

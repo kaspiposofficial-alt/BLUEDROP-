@@ -192,6 +192,11 @@ Note: Transcribed cleanly.`;
 
     const pure = extractPureLyricsOnly(dirty);
     expect(pure).toBe('Walking down the Casablanca street\nBassline heavy under every beat');
+
+    const withLrc = extractPureLyricsOnly(
+      '[00:12.40] Walking down the Casablanca street\n[00:16.10] Bassline heavy under every beat'
+    );
+    expect(withLrc).toBe('Walking down the Casablanca street\nBassline heavy under every beat');
   });
 
   it('returns clean offline lyrics action without hallucinated chatter', async () => {
@@ -395,7 +400,62 @@ Note: Transcribed cleanly.`;
     expect(sitemap).toContain('https://bluedrop.example/music-player');
     expect(sitemap).toContain('xhtml:link rel="alternate" hreflang="ar"');
   });
+
+  it('excludes all 29s/30s iTunes/Deezer snippet previews from full-length search results', async () => {
+    const { searchMedia } = await import('../server/media.js');
+    const res = await searchMedia('Daft Punk', 'music');
+    for (const item of res.items) {
+      expect(item.id.startsWith('itunes-')).toBe(false);
+      expect(item.id.startsWith('deezer-')).toBe(false);
+      expect(item.previewStreamUrl || '').not.toContain('dzcdn.net');
+      expect(item.previewStreamUrl || '').not.toContain('mzstatic.com');
+      if (item.kind === 'audio' && item.durationSec > 0) {
+        expect(item.durationSec).toBeGreaterThanOrEqual(40);
+      }
+    }
+  }, 20000);
+
+  it('transcodes disk-to-disk via runFfmpegFileToTempFile without holding big files in RAM', async () => {
+    const { spawn } = await import('node:child_process');
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { runFfmpegFileToTempFile } = await import('../server/media.js');
+
+    const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bluedrop-disk-'));
+    const sampleMp4 = path.join(tmpDir, 'longfixture.mp4');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('ffmpeg', [
+          '-y',
+          '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=12',
+          '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+          sampleMp4,
+        ]);
+        child.on('error', reject);
+        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+      });
+
+      const out = await runFfmpegFileToTempFile({
+        inputPath: sampleMp4,
+        targetFormat: 'mp3-320',
+        title: 'Full Session',
+        artist: 'BLUEDROP',
+      });
+      try {
+        expect(out.ext).toBe('mp3');
+        expect(out.sizeBytes).toBeGreaterThan(500);
+        expect(fs.existsSync(out.outputPath)).toBe(true);
+      } finally {
+        await out.cleanup();
+      }
+    } finally {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });
+
 
 
 

@@ -279,7 +279,7 @@ export async function runClientMediaAnalysisAndSync(
 
     let pcmSamples = options.localAudioSamples;
     let sampleRate = options.localSampleRate;
-    if (!pcmSamples && media.previewStreamUrl && (media.kind === 'audio' || media.platform === 'itunes')) {
+    if (!pcmSamples && media.previewStreamUrl && media.kind === 'audio') {
       const decoded = await decodeAudioSamplesFromUrl(media.previewStreamUrl);
       pcmSamples = decoded.samples;
       sampleRate = decoded.sampleRate;
@@ -380,22 +380,128 @@ export async function runClientMediaAnalysisAndSync(
   });
 }
 
+export type EqBands4 = [number, number, number, number];
+export const IDLE_EQ_BANDS: EqBands4 = [0.18, 0.18, 0.18, 0.18];
+
+function isSameOriginAudioSrc(mediaEl: HTMLMediaElement): boolean {
+  const src = mediaEl.currentSrc || mediaEl.src || '';
+  if (!src) return false;
+  if (src.startsWith('blob:') || src.startsWith('data:') || src.startsWith('/')) return true;
+  try {
+    return typeof window !== 'undefined' && new URL(src, window.location.origin).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function binsToEqBands(freqData: Uint8Array): EqBands4 {
+  const avgRange = (start: number, end: number): number => {
+    let sum = 0;
+    let count = 0;
+    for (let i = start; i <= end && i < freqData.length; i += 1) {
+      sum += freqData[i] ?? 0;
+      count += 1;
+    }
+    return count > 0 ? sum / (count * 255) : 0;
+  };
+  const b1 = Math.max(0.18, Math.min(1, 0.18 + avgRange(0, 2) * 0.95));
+  const b2 = Math.max(0.18, Math.min(1, 0.18 + avgRange(3, 6) * 0.95));
+  const b3 = Math.max(0.18, Math.min(1, 0.18 + avgRange(7, 13) * 1.05));
+  const b4 = Math.max(0.18, Math.min(1, 0.18 + avgRange(14, 24) * 1.15));
+  return [b1, b2, b3, b4];
+}
+
+const mediaAnalyserCache = new WeakMap<
+  HTMLMediaElement,
+  { ctx: AudioContext; analyser: AnalyserNode; freqData: Uint8Array<ArrayBuffer> }
+>();
+
+export function sampleMediaElementBands(mediaEl: HTMLMediaElement | null): EqBands4 {
+  if (!mediaEl || mediaEl.paused || mediaEl.ended || mediaEl.readyState < 2) {
+    return IDLE_EQ_BANDS;
+  }
+  if (typeof window !== 'undefined' && isSameOriginAudioSrc(mediaEl)) {
+    let entry = mediaAnalyserCache.get(mediaEl);
+    if (!entry) {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        try {
+          const ctx = new AudioCtx();
+          const source = ctx.createMediaElementSource(mediaEl);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 64;
+          analyser.smoothingTimeConstant = 0.72;
+          source.connect(analyser);
+          analyser.connect(ctx.destination);
+          entry = {
+            ctx,
+            analyser,
+            freqData: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)),
+          };
+          mediaAnalyserCache.set(mediaEl, entry);
+        } catch {
+          // Element may already be bound elsewhere or blocked; fallback cadence used below
+        }
+      }
+    }
+    if (entry) {
+      if (entry.ctx.state === 'suspended') {
+        void entry.ctx.resume().catch(() => {});
+      }
+      if (entry.ctx.state === 'running') {
+        entry.analyser.getByteFrequencyData(entry.freqData);
+        const bands = binsToEqBands(entry.freqData);
+        if (bands[0] > 0.19 || bands[1] > 0.19 || bands[2] > 0.19 || bands[3] > 0.19) {
+          return bands;
+        }
+      }
+    }
+  }
+
+  // Fallback cadence strictly tied to active advancing playback currentTime (never when paused)
+  const t = mediaEl.currentTime;
+  return [
+    0.26 + Math.abs(Math.sin(t * 9.5)) * 0.62,
+    0.26 + Math.abs(Math.sin(t * 12.1 + 1.1)) * 0.68,
+    0.26 + Math.abs(Math.sin(t * 14.3 + 2.3)) * 0.65,
+    0.26 + Math.abs(Math.sin(t * 10.7 + 3.4)) * 0.56,
+  ];
+}
+
 /**
  * Client-Side Web Audio Stem Filter (Full Mix | Instrumental Mid/Side Cancel | Vocal Focus)
- * Zero server CPU required.
+ * + Live FFT AnalyserNode metering for audio-reactive UI bars. Zero server CPU required.
  */
 export type StemListeningMode = 'full' | 'instrumental' | 'vocals';
 
 export class ClientAudioStemController {
   private ctx: AudioContext | null = null;
+  private boundAudioEl: HTMLAudioElement | null = null;
   private source: MediaElementAudioSourceNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private freqData: Uint8Array<ArrayBuffer> | null = null;
   private mode: StemListeningMode = 'full';
   private gainFull: GainNode | null = null;
   private gainInst: GainNode | null = null;
   private gainVocal: GainNode | null = null;
+  private masterGain: GainNode | null = null;
 
   public attach(audioEl: HTMLAudioElement): void {
-    if (this.source || typeof window === 'undefined') return;
+    this.boundAudioEl = audioEl;
+    if (this.mode !== 'full' || isSameOriginAudioSrc(audioEl)) {
+      this.ensureGraphConnected();
+    }
+    if (this.ctx?.state === 'suspended') {
+      void this.ctx.resume().catch(() => {});
+    }
+  }
+
+  private ensureGraphConnected(): void {
+    const audioEl = this.boundAudioEl;
+    if (!audioEl || this.source || typeof window === 'undefined') return;
+    if (!isSameOriginAudioSrc(audioEl) && this.mode === 'full') return;
     const AudioCtx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -404,12 +510,22 @@ export class ClientAudioStemController {
     try {
       this.ctx = new AudioCtx();
       this.source = this.ctx.createMediaElementSource(audioEl);
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = 1;
+
+      this.analyser = this.ctx.createAnalyser();
+      this.analyser.fftSize = 64;
+      this.analyser.smoothingTimeConstant = 0.72;
+      this.freqData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
+
+      this.masterGain.connect(this.analyser);
+      this.analyser.connect(this.ctx.destination);
 
       // Branch 1: Full Mix
       this.gainFull = this.ctx.createGain();
-      this.gainFull.gain.value = 1;
+      this.gainFull.gain.value = this.mode === 'full' ? 1 : 0;
       this.source.connect(this.gainFull);
-      this.gainFull.connect(this.ctx.destination);
+      this.gainFull.connect(this.masterGain);
 
       // Branch 2: Instrumental (L - R Mid/Side center cancellation)
       const splitter = this.ctx.createChannelSplitter(2);
@@ -418,14 +534,14 @@ export class ClientAudioStemController {
       const sideMix = this.ctx.createGain();
       sideMix.gain.value = 0.85;
       this.gainInst = this.ctx.createGain();
-      this.gainInst.gain.value = 0;
+      this.gainInst.gain.value = this.mode === 'instrumental' ? 1 : 0;
 
       this.source.connect(splitter);
       splitter.connect(sideMix, 0);
       splitter.connect(invertR, 1);
       invertR.connect(sideMix);
       sideMix.connect(this.gainInst);
-      this.gainInst.connect(this.ctx.destination);
+      this.gainInst.connect(this.masterGain);
 
       // Branch 3: Vocal Focus (Bandpass 300Hz - 3400Hz)
       const hp = this.ctx.createBiquadFilter();
@@ -435,27 +551,65 @@ export class ClientAudioStemController {
       lp.type = 'lowpass';
       lp.frequency.value = 3400;
       this.gainVocal = this.ctx.createGain();
-      this.gainVocal.gain.value = 0;
+      this.gainVocal.gain.value = this.mode === 'vocals' ? 1 : 0;
 
       this.source.connect(hp);
       hp.connect(lp);
       lp.connect(this.gainVocal);
-      this.gainVocal.connect(this.ctx.destination);
-
-      this.setMode(this.mode);
+      this.gainVocal.connect(this.masterGain);
     } catch {
-      // Cross-origin audio element cannot be routed through Web Audio; native playback still works
+      // Fallback: native playback continues uninterrupted
     }
+  }
+
+  public getFrequencyBands(): EqBands4 {
+    const audioEl = this.boundAudioEl;
+    if (!audioEl || audioEl.paused || audioEl.ended || audioEl.readyState < 2) {
+      return IDLE_EQ_BANDS;
+    }
+    if (this.analyser && this.freqData && this.ctx?.state === 'running') {
+      this.analyser.getByteFrequencyData(this.freqData);
+      const bands = binsToEqBands(this.freqData);
+      if (bands[0] > 0.19 || bands[1] > 0.19 || bands[2] > 0.19 || bands[3] > 0.19) {
+        return bands;
+      }
+    }
+    const t = audioEl.currentTime;
+    return [
+      0.26 + Math.abs(Math.sin(t * 9.5)) * 0.62,
+      0.26 + Math.abs(Math.sin(t * 12.1 + 1.1)) * 0.68,
+      0.26 + Math.abs(Math.sin(t * 14.3 + 2.3)) * 0.65,
+      0.26 + Math.abs(Math.sin(t * 10.7 + 3.4)) * 0.56,
+    ];
   }
 
   public setMode(mode: StemListeningMode): void {
     this.mode = mode;
+    if (mode !== 'full') {
+      this.ensureGraphConnected();
+    }
     if (this.ctx?.state === 'suspended') {
-      void this.ctx.resume();
+      void this.ctx.resume().catch(() => {});
     }
     if (this.gainFull) this.gainFull.gain.value = mode === 'full' ? 1 : 0;
     if (this.gainInst) this.gainInst.gain.value = mode === 'instrumental' ? 1 : 0;
     if (this.gainVocal) this.gainVocal.gain.value = mode === 'vocals' ? 1 : 0;
+  }
+
+  public async resumeIfNeeded(): Promise<void> {
+    if (this.ctx?.state === 'suspended') {
+      await this.ctx.resume().catch(() => {});
+    }
+  }
+
+  public async fadeTransition(audioEl: HTMLAudioElement, targetVol = 1, durationMs = 260): Promise<void> {
+    const startVol = audioEl.volume;
+    const steps = 8;
+    const stepMs = Math.max(16, Math.round(durationMs / steps));
+    for (let i = 1; i <= steps; i += 1) {
+      audioEl.volume = Math.max(0, Math.min(1, startVol + ((targetVol - startVol) * i) / steps));
+      await new Promise((r) => setTimeout(r, stepMs));
+    }
   }
 
   public getMode(): StemListeningMode {
@@ -489,4 +643,69 @@ export async function convertImageFileLocally(
       0.92
     );
   });
+}
+
+function encodeAudioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  const numChannels = Math.min(2, Math.max(1, buffer.numberOfChannels));
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length * numChannels * 2;
+  const wavBuffer = new ArrayBuffer(44 + length);
+  const view = new DataView(wavBuffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i += 1) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + length, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true);
+  view.setUint16(32, numChannels * 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, length, true);
+
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch += 1) {
+    channels.push(buffer.getChannelData(ch));
+  }
+  let offset = 44;
+  for (let i = 0; i < buffer.length; i += 1) {
+    for (let ch = 0; ch < numChannels; ch += 1) {
+      const s = Math.max(-1, Math.min(1, channels[ch]![i] ?? 0));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([wavBuffer], { type: 'audio/wav' });
+}
+
+/**
+ * Client-side Audio -> PCM 16-bit WAV converter with zero server load.
+ */
+export async function exportLocalAudioAsWavClient(blob: Blob): Promise<Blob> {
+  if (!blob || blob.size === 0 || blob.size > 90 * 1024 * 1024) {
+    throw new Error('File too large for in-browser WAV decode.');
+  }
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) {
+    throw new Error('Web Audio API unavailable.');
+  }
+  const ctx = new AudioCtx();
+  try {
+    const arrBuf = await blob.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(arrBuf);
+    return encodeAudioBufferToWavBlob(audioBuffer);
+  } finally {
+    void ctx.close().catch(() => {});
+  }
 }

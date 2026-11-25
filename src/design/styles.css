@@ -1573,18 +1573,57 @@ body.tile-capture #stagewrap {
 }
 
 .bd-player-btn {
-  width: 36px;
+  min-width: 88px;
+  width: auto;
   height: 36px;
+  padding: 0 12px;
   background: var(--c1);
   color: var(--ink);
   border: 1.5px solid var(--c1);
   font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.bd-player-btn.is-playing,
+.bd-mini-btn.is-playing {
+  background: var(--mint) !important;
+  color: var(--ink) !important;
+  border-color: var(--mint) !important;
+}
+
+.bd-player-state-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border: 1px solid var(--rule-dark);
+  color: var(--muted-bone);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.bd-player-state-pill.is-playing {
+  border-color: var(--mint);
+  color: var(--mint);
+}
+
+.bd-player-state-dot {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  display: inline-block;
 }
 
 .bd-player-track {
@@ -1886,12 +1925,13 @@ body.tile-capture #stagewrap {
     gap: 8px;
   }
   .bd-mini-dock #bd-dock-next {
-    display: none;
+    display: inline-flex;
   }
   .bd-mini-dock .bd-mini-btn,
   .bd-mini-dock .bd-bookmark-btn {
-    min-height: 36px;
-    padding: 4px 9px;
+    min-height: 34px;
+    padding: 4px 7px;
+    font-size: 10px;
   }
   .bd-hide-mobile {
     display: none;
@@ -1901,12 +1941,7 @@ body.tile-capture #stagewrap {
   }
 }
 
-/* ---------- Animated 4-Bar Equalizer Effect & Playing Badge ---------- */
-@keyframes bdEqPulse {
-  0%, 100% { transform: scaleY(0.28); }
-  50% { transform: scaleY(1); }
-}
-
+/* ---------- Live Audio-Reactive 4-Bar Equalizer Effect & Playing Badge ---------- */
 .bd-playing-badge {
   position: absolute;
   left: 6px;
@@ -1938,12 +1973,18 @@ body.tile-capture #stagewrap {
   height: 100%;
   background: currentColor;
   transform-origin: bottom center;
-  animation: bdEqPulse 0.72s ease-in-out infinite;
+  transform: scaleY(0.18);
+  transition: transform 0.06s linear;
 }
 
-.bd-eq-bars span:nth-child(2) { animation-delay: 0.16s; }
-.bd-eq-bars span:nth-child(3) { animation-delay: 0.34s; }
-.bd-eq-bars span:nth-child(4) { animation-delay: 0.22s; }
+.bd-eq-bars.is-paused span {
+  transform: scaleY(0.18) !important;
+}
+
+.bd-eq-bars.is-live span:nth-child(1) { transform: scaleY(var(--eq-b1, 0.24)); }
+.bd-eq-bars.is-live span:nth-child(2) { transform: scaleY(var(--eq-b2, 0.36)); }
+.bd-eq-bars.is-live span:nth-child(3) { transform: scaleY(var(--eq-b3, 0.28)); }
+.bd-eq-bars.is-live span:nth-child(4) { transform: scaleY(var(--eq-b4, 0.22)); }
 
 /* ---------- Spotify-Style List Row View ---------- */
 .bd-list-row {
@@ -2073,33 +2114,94 @@ body.tile-capture #stagewrap {
   font-weight: 700;
 }
 
-/* ---------- Lyrics Box & Synced Highlight ---------- */
+/* ---------- Lyrics Box & Live Synced Karaoke Highlight ---------- */
 .bd-lyrics-box {
   background: var(--ink);
   color: var(--bone);
   border: 1.5px solid var(--rule-dark);
-  padding: 14px 16px;
-  max-height: 280px;
+  padding: 12px 14px;
+  max-height: 290px;
   overflow-y: auto;
+  scroll-behavior: smooth;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  line-height: 1.55;
+  gap: 5px;
+  line-height: 1.5;
+  position: relative;
 }
 
 .bd-lyric-line {
+  position: relative;
+  width: 100%;
+  text-align: start;
   font-size: 14px;
+  line-height: 1.48;
+  color: rgba(243, 240, 230, 0.72);
+  background: transparent;
+  padding: 7px 10px 9px;
+  border: 1px solid transparent;
+  border-inline-start: 3px solid transparent;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: color 0.14s ease, background 0.14s ease, border-color 0.14s ease, opacity 0.14s ease, transform 0.14s ease;
+}
+
+.bd-lyric-line:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--bone);
+}
+
+.bd-lyric-line.is-past {
+  opacity: 0.45;
   color: var(--muted-bone);
-  padding: 3px 6px;
-  border-left: 2px solid transparent;
-  transition: color 0.14s ease, border-color 0.14s ease;
 }
 
 .bd-lyric-line.active {
+  opacity: 1;
   color: var(--c1);
-  border-left-color: var(--c1);
-  background: #1d1d17;
+  border-color: rgba(244, 240, 58, 0.35);
+  border-inline-start: 4px solid var(--c1);
+  background: #1f1f14;
   font-weight: 600;
+  font-size: 15px;
+}
+
+.bd-lyric-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-bone);
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.bd-lyric-line.active .bd-lyric-time {
+  color: var(--mint);
+  opacity: 1;
+}
+
+.bd-lyric-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.bd-lyric-meter {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: var(--lyric-pct, 0%);
+  background: var(--c1);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.bd-lyric-line.active .bd-lyric-meter {
+  opacity: 1;
 }
 
 /* ---------- Mini-Dock Progress Edge & Footer Clearance ---------- */
@@ -2415,5 +2517,144 @@ body.has-mini-dock .bd-footer {
     padding-bottom: calc(134px + env(safe-area-inset-bottom));
   }
 }
+
+/* ---------- 3-Dot Card Action Menu, Offline Badge & Live Download Toast ---------- */
+.bd-dots-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.bd-dots-btn {
+  width: 34px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--rule-dark);
+  background: var(--ink);
+  color: var(--bone);
+  flex-shrink: 0;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease;
+}
+
+.bd-dots-btn:hover,
+.bd-dots-btn[aria-expanded='true'] {
+  background: var(--c1);
+  color: var(--ink);
+  border-color: var(--c1);
+}
+
+.bd-card-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 55;
+  min-width: 176px;
+  max-width: calc(100vw - 24px);
+  background: var(--ink);
+  color: var(--bone);
+  border: 1.5px solid var(--c1);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+[dir='rtl'] .bd-card-menu {
+  right: auto;
+  left: 0;
+}
+
+.bd-card-menu-item {
+  width: 100%;
+  padding: 8px 10px;
+  text-align: start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bone);
+  background: transparent;
+  min-height: 34px;
+}
+
+.bd-card-menu-item:hover {
+  background: var(--c1);
+  color: var(--ink);
+}
+
+.bd-card-menu-item.is-danger {
+  color: var(--c6);
+  border-top: 1px solid var(--rule-dark);
+  margin-top: 2px;
+  padding-top: 9px;
+}
+
+.bd-card-menu-item.is-danger:hover {
+  background: var(--c6);
+  color: var(--ink);
+}
+
+.bd-offline-badge {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  background: var(--mint);
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+@keyframes bdDownloadPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.bd-format-tile.is-downloading,
+.bd-btn.is-downloading {
+  outline: 2px solid var(--bone);
+  outline-offset: -2px;
+  animation: bdDownloadPulse 0.85s ease-in-out infinite;
+}
+
+.bd-dl-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 84px;
+  z-index: 70;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--ink);
+  color: var(--bone);
+  border: 2px solid var(--c1);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+[dir='rtl'] .bd-dl-toast {
+  right: auto;
+  left: 16px;
+}
+
+@media (max-width: 767px) {
+  .bd-dl-toast {
+    bottom: calc(122px + env(safe-area-inset-bottom));
+  }
+}
+
 
 

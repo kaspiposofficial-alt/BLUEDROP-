@@ -256,6 +256,9 @@ async function startFullStackServer(): Promise<void> {
     }
   });
 
+  server.requestTimeout = 0;
+  server.timeout = 0;
+
   server.listen(port, host, () => {
     console.log(
       `[BLUEDROP] Full-stack server listening on http://${host}:${port} (model=${config.modelName}, key=${config.hasApiKey ? 'configured' : 'offline-fallback'})`

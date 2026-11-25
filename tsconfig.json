@@ -17,6 +17,7 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": [
+    "api/**/*.ts",
     "contracts/**/*.ts",
     "src/**/*.ts",
     "pipeline/**/*.ts",

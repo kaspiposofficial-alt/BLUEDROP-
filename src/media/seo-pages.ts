@@ -204,7 +204,7 @@ export const SEO_PAGES: readonly SeoRoutePage[] = [
     pageTitle: 'Listen to Music Free Without Ads — BLUEDROP Player',
     headline: 'Stream music & synced lyrics with zero ads.',
     description:
-      'Listen to full songs free without ads across SoundCloud, Audius, Deezer & YouTube, organize folders, and read synced track lyrics cleanly.',
+      'Listen to full songs free without ads across SoundCloud, Audius, Internet Archive & YouTube, organize folders, and read synced track lyrics cleanly.',
     arTitle: 'استمع إلى الموسيقى مجاناً بدون إشهارات — بلو دروب',
     arDescription:
       'استمع إلى الموسيقى والأغاني مجاناً مع كلمات الأغاني (Lyrics) وحفظ البلاي ليست وتشغيل الخلفية 100% بدون أي إشهارات.',
