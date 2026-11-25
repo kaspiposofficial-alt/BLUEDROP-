@@ -1,0 +1,201 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated Gmail user profile with persistent display name, Google profile photo URL, pixel palette study summary, and synced device counter.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "photoUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "avatarPalette": {
+          "type": "array"
+        },
+        "deviceCount": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "email", "photoUrl", "createdAt", "updatedAt"]
+    },
+    "LibraryMediaEntry": {
+      "title": "LibraryMediaEntry",
+      "description": "Synced media card saved in a signed-in user's persistent cross-device library.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "creator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["video", "audio", "image"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["music", "video", "albums", "favorites", "uploads"]
+        },
+        "folderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "sourceUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1000
+        },
+        "durationLabel": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "title",
+        "creator",
+        "platform",
+        "kind",
+        "category",
+        "folderName",
+        "sourceUrl",
+        "pinned",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VisualClipKnowledge": {
+      "title": "VisualClipKnowledge",
+      "description": "Anonymized non-PII AI learning telemetry capturing pixel palettes, 3D lighting/depth cues, clip categories, and lyrics fluency patterns across devices.",
+      "type": "object",
+      "properties": {
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studyType": {
+          "type": "string",
+          "enum": ["avatar-pixel-study", "clip-study", "lyrics-fluency"]
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "clipType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "bpm": {
+          "type": "number"
+        },
+        "depthRatio": {
+          "type": "number"
+        },
+        "paletteHexes": {
+          "type": "array"
+        },
+        "studySummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 800
+        },
+        "lyricsSample": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 600
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "authorUid",
+        "studyType",
+        "platform",
+        "clipType",
+        "paletteHexes",
+        "studySummary",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private owner-only Gmail account profile with avatar URL, pixel palette vector, and synced device count."
+    },
+    "/users/{userId}/library/{itemId}": {
+      "schema": { "$ref": "#/entities/LibraryMediaEntry" },
+      "description": "Owner-only synced library entries persisted across web and installed PWA devices."
+    },
+    "/visual_clip_knowledge/{cardId}": {
+      "schema": { "$ref": "#/entities/VisualClipKnowledge" },
+      "description": "Collective non-PII pixel, 3D geometry, clip type, and lyrics fluency learning cards shared across sessions."
+    }
+  }
+}

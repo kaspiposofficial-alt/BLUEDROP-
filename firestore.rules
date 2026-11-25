@@ -1,0 +1,163 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core security primitives
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidPaletteList(listVal) {
+      return listVal is list &&
+        listVal.size() <= 6 &&
+        (listVal.size() == 0 || (listVal[0] is string && listVal[0].size() <= 16));
+    }
+
+    // Entity 1: UserProfile (/users/{userId}) - Strictly Owner-Only PII Isolation
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'photoUrl', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'email', 'photoUrl', 'avatarPalette', 'deviceCount', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid == request.auth.uid && data.uid == userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+        data.photoUrl is string && data.photoUrl.size() <= 1000 &&
+        (!('avatarPalette' in data) || isValidPaletteList(data.avatarPalette)) &&
+        (!('deviceCount' in data) || ((data.deviceCount is int || data.deviceCount is float) && data.deviceCount >= 1 && data.deviceCount <= 9999)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Entity 2: LibraryMediaEntry (/users/{userId}/library/{itemId})
+    function isValidLibraryMediaEntry(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'title', 'creator', 'platform', 'kind', 'category',
+          'folderName', 'sourceUrl', 'pinned', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'title', 'creator', 'platform', 'kind', 'category',
+          'folderName', 'sourceUrl', 'thumbnailUrl', 'durationLabel',
+          'pinned', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid == request.auth.uid && data.uid == userId &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+        data.creator is string && data.creator.size() >= 1 && data.creator.size() <= 200 &&
+        data.platform is string && data.platform.size() >= 1 && data.platform.size() <= 40 &&
+        data.kind in ['video', 'audio', 'image'] &&
+        data.category in ['music', 'video', 'albums', 'favorites', 'uploads'] &&
+        data.folderName is string && data.folderName.size() >= 1 && data.folderName.size() <= 80 &&
+        data.sourceUrl is string && data.sourceUrl.size() >= 1 && data.sourceUrl.size() <= 1000 &&
+        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 1000)) &&
+        (!('durationLabel' in data) || (data.durationLabel is string && data.durationLabel.size() <= 32)) &&
+        data.pinned is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Entity 3: VisualClipKnowledge (/visual_clip_knowledge/{cardId}) - Zero PII collective brain
+    function isValidVisualClipKnowledge(data) {
+      return data.keys().hasAll([
+          'authorUid', 'studyType', 'platform', 'clipType', 'paletteHexes', 'studySummary', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'authorUid', 'studyType', 'platform', 'clipType', 'bpm', 'depthRatio',
+          'paletteHexes', 'studySummary', 'lyricsSample', 'createdAt'
+        ]) &&
+        data.authorUid is string && data.authorUid.size() >= 1 && data.authorUid.size() <= 128 && data.authorUid == request.auth.uid &&
+        data.studyType in ['avatar-pixel-study', 'clip-study', 'lyrics-fluency'] &&
+        data.platform is string && data.platform.size() >= 1 && data.platform.size() <= 40 &&
+        data.clipType is string && data.clipType.size() >= 1 && data.clipType.size() <= 80 &&
+        (!('bpm' in data) || ((data.bpm is int || data.bpm is float) && data.bpm >= 0 && data.bpm <= 300)) &&
+        (!('depthRatio' in data) || ((data.depthRatio is int || data.depthRatio is float) && data.depthRatio >= 0 && data.depthRatio <= 100)) &&
+        isValidPaletteList(data.paletteHexes) &&
+        data.studySummary is string && data.studySummary.size() >= 1 && data.studySummary.size() <= 800 &&
+        (!('lyricsSample' in data) || (data.lyricsSample is string && data.lyricsSample.size() <= 600)) &&
+        data.createdAt is timestamp;
+    }
+
+    // Startup connection validation read doc (non-PII health probe)
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Private Gmail User Profiles (PII strictly isolated to owner; listing denied)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'email', 'photoUrl', 'avatarPalette', 'deviceCount', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      // Synced Cross-Device Media Library (Master Gate checks parent /users/{userId})
+      match /library/{itemId} {
+        allow get: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.uid == request.auth.uid;
+        allow create: if isValidId(userId) &&
+          isValidId(itemId) &&
+          isOwner(userId) &&
+          isValidLibraryMediaEntry(incoming(), userId) &&
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) &&
+          isValidId(itemId) &&
+          isOwner(userId) &&
+          isValidLibraryMediaEntry(incoming(), userId) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'creator', 'platform', 'kind', 'category',
+            'folderName', 'sourceUrl', 'thumbnailUrl', 'durationLabel', 'pinned', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+      }
+    }
+
+    // Collective Non-PII Visual Pixel, 3D Study & Clip Fluency Memory
+    match /visual_clip_knowledge/{cardId} {
+      allow get: if isValidId(cardId) && isSignedIn();
+      allow list: if isSignedIn() && resource.data.studyType in ['avatar-pixel-study', 'clip-study', 'lyrics-fluency'];
+      allow create: if isValidId(cardId) &&
+        isSignedIn() &&
+        isValidVisualClipKnowledge(incoming()) &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(cardId) && isSignedIn() && existing().authorUid == request.auth.uid;
+    }
+  }
+}

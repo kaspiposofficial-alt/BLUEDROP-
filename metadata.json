@@ -1,0 +1,8 @@
+{
+  "name": "BLUEDROP — Video, Music & Media Downloader",
+  "description": "100% ad-free universal video, music & media downloader and converter (4K MP4, 320kbps MP3, WAV, FLAC, WEBM, PNG) with zero popups and synced playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "/",
+  "name": "BLUEDROP",
+  "short_name": "BLUEDROP",
+  "description": "100% ad-free video & music downloader, background player, and format converter with zero popups.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#111111",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "file_handlers": [
+    {
+      "action": "/",
+      "accept": {
+        "video/*": [".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi"],
+        "audio/*": [".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".opus"],
+        "image/*": [".png", ".jpg", ".jpeg", ".webp"]
+      }
+    }
+  ]
+}
